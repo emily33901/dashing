@@ -30,6 +30,8 @@ func main() {
 	var bestAudioFormat *YtdlResultFormat = nil
 	var bestVideoFormat *YtdlResultFormat = nil
 
+	log.Println(ytdlResult.Formats)
+
 	for i, format := range ytdlResult.Formats {
 		typ := format.typ()
 
@@ -42,6 +44,16 @@ func main() {
 			log.Println("format video", format.ID, *format.Width, "x", *format.Height, "@", *format.FPS, "bitrate", *format.VideoBitRate)
 			if bestVideoFormat == nil || *format.VideoBitRate > *bestVideoFormat.VideoBitRate {
 				bestVideoFormat = &ytdlResult.Formats[i]
+			}
+		} else if typ == YtdlFormatTypeBoth {
+			log.Println("format both", format.ID, *format.Width, "x", *format.Height, "@", *format.FPS, "bitrate", *format.VideoBitRate)
+			if bestVideoFormat == nil || *format.VideoBitRate > *bestVideoFormat.VideoBitRate {
+				bestVideoFormat = &ytdlResult.Formats[i]
+			}
+
+			log.Println("format audio", format.ID, *format.AudioSampleRate, "hz", "bitrate", *format.AudioBitRate)
+			if bestAudioFormat == nil || *format.AudioBitRate > *bestAudioFormat.AudioBitRate {
+				bestAudioFormat = &ytdlResult.Formats[i]
 			}
 		}
 	}

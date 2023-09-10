@@ -43,11 +43,14 @@ const (
 )
 
 func (format *YtdlResultFormat) typ() int {
-	if format.AudioBitRate != nil && format.VideoBitRate == nil {
+	hasAudio := format.AudioBitRate != nil && *format.AudioBitRate != 0
+	hasVideo := format.VideoBitRate != nil && *format.VideoBitRate != 0
+
+	if hasAudio && !hasVideo {
 		return YtdlFormatTypeAudio
-	} else if format.AudioBitRate == nil && format.VideoBitRate == nil {
+	} else if !hasAudio && !hasVideo {
 		return YtdlFormatTypeStoryBoard
-	} else if format.AudioBitRate != nil && format.VideoBitRate != nil {
+	} else if hasAudio && hasVideo {
 		return YtdlFormatTypeBoth
 	}
 	return YtdlFormatTypeVideo

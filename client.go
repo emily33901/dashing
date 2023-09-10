@@ -2,6 +2,7 @@ package main
 
 import (
 	"bufio"
+	"bytes"
 	"fmt"
 	"io"
 	"math/rand"
@@ -40,6 +41,7 @@ func NewDashClient(id string, af, vf DashFormat, out io.Writer) DashClient {
 	}
 }
 
+//
 func ffmpeg(id string) (net.Listener, net.Listener, net.Listener, *strings.Builder, *exec.Cmd) {
 	aname := fmt.Sprintf(`\\.\pipe\DashClient\%s\a`, id)
 	vname := fmt.Sprintf(`\\.\pipe\DashClient\%s\v`, id)
@@ -110,7 +112,7 @@ func (c *DashClient) segmentProducer(
 	type finishedSegment struct {
 		seq  int
 		typ  int
-		data io.ReadCloser
+		data []byte
 	}
 
 	finished := make(chan finishedSegment, DashClientGroupSize)
@@ -137,7 +139,7 @@ func (c *DashClient) segmentProducer(
 				finished <- finishedSegment{seq: sequence, typ: SegmentTypeFailed, data: nil}
 			}
 
-			start := time.Now()
+			startGet := time.Now()
 			logger.Debugln("Requesting segment")
 			response, err := c.client.Post(segmentUrl, "", nil)
 			if err != nil {
@@ -145,70 +147,88 @@ func (c *DashClient) segmentProducer(
 				time.Sleep(makeBackoff(segmentDuration, segmentDuration))
 				continue
 			}
-			get := time.Now()
+			finishGet := time.Now()
 
-			// Update the last head seq
-			info, err = format.ServerInfo(response.Header)
-			if err != nil {
-				// Missing a header that we want to have, backoff and try again
-				logger.WithFields(log.Fields{"error": err, "header": response.Header}).Errorln("Response was missing required fields from header")
-				time.Sleep(makeBackoff(segmentDuration, segmentDuration))
-				continue
-			}
-			logger.WithFields(log.Fields{"contentLength": response.ContentLength, "statusCode": response.StatusCode}).Debugln(which, sequence, "Got response")
+			if func() bool {
+				defer response.Body.Close()
 
-			lastHeadSeq := lastInfo.HeadSequence
-			curHeadSeq := info.HeadSequence
+				// Update the last head seq
+				info, err = format.ServerInfo(response.Header)
+				if err != nil {
+					// Missing a header that we want to have, backoff and try again
+					logger.WithFields(log.Fields{"error": err, "header": response.Header}).Errorln("Response was missing required fields from header")
+					time.Sleep(makeBackoff(segmentDuration, segmentDuration))
+					return false
+				}
+				logger.WithFields(log.Fields{"contentLength": response.ContentLength, "statusCode": response.StatusCode}).Debugln(which, sequence, "Got response")
 
-			if response.StatusCode != 200 {
-				// NOTE(emily): 404, 401 doesn't necessarily indicate that this is the last sequence in the stream
-				// It indicates that a segment doesn't exist yet for this sequence. That segment might appear
-				// in the future, if the stream keeps running...
-				// Here it would make sense to wait until that deadline (i.e. when our segment should be, vs where
-				// we currently are) and try again.
-				// In order to make that more effective, it might make sense to keep track of whether the head seq
-				// is moving aswell, as that will give us a good indication for if we can early out (i.e. head seq
-				// has not moved in 5 * segmentDuration, therefore there is no chance that we are ever going to
-				// exist because we are 40 * segmentDuration away from the head of the stream). But also gives us a
-				// good indication that we will probably exist if head seq moves along.
-				// Of course there is the case that even if head seq moves, we still might not exist in the future,
-				// however that is probably fine.
+				lastHeadSeq := lastInfo.HeadSequence
+				curHeadSeq := info.HeadSequence
 
-				if response.StatusCode == http.StatusNotFound || response.StatusCode == http.StatusUnauthorized {
-					// This segment isn't available yet, or will never exist.
-					const deadlineTry = 5
+				if response.StatusCode != 200 {
+					// NOTE(emily): 404, 401 doesn't necessarily indicate that this is the last sequence in the stream
+					// It indicates that a segment doesn't exist yet for this sequence. That segment might appear
+					// in the future, if the stream keeps running...
+					// Here it would make sense to wait until that deadline (i.e. when our segment should be, vs where
+					// we currently are) and try again.
+					// In order to make that more effective, it might make sense to keep track of whether the head seq
+					// is moving aswell, as that will give us a good indication for if we can early out (i.e. head seq
+					// has not moved in 5 * segmentDuration, therefore there is no chance that we are ever going to
+					// exist because we are 40 * segmentDuration away from the head of the stream). But also gives us a
+					// good indication that we will probably exist if head seq moves along.
+					// Of course there is the case that even if head seq moves, we still might not exist in the future,
+					// however that is probably fine.
 
-					// Make sure that the head sequence is actually moving forwards
-					// (allow for atleast 2 durations worth of slack here, because we are not synced with the
-					// servers wall-clock).
-					if try > deadlineTry && curHeadSeq == lastHeadSeq {
+					if response.StatusCode == http.StatusNotFound || response.StatusCode == http.StatusUnauthorized {
+						// This segment isn't available yet, or will never exist.
+						const deadlineTry = 5
+
+						// Make sure that the head sequence is actually moving forwards
+						// (allow for atleast 2 durations worth of slack here, because we are not synced with the
+						// servers wall-clock).
+						if try > deadlineTry && curHeadSeq == lastHeadSeq {
+							logger.WithFields(
+								log.Fields{
+									"status":           response.StatusCode,
+									"try":              try,
+									"lastHeadSequence": lastHeadSeq,
+									"curHeadSequence":  curHeadSeq,
+								}).Warnln("Head sequence is not moving, failing segment")
+							finished <- finishedSegment{seq: sequence, typ: SegmentTypeFailed, data: nil}
+							return true
+						}
+
+						// Wait for the stream move forwards and then try and get this segment again.
+						// Atleast 5 delta
+						seqDelta := sequence - curHeadSeq
+						if seqDelta <= 0 {
+							seqDelta = try + 1
+						}
+
+						// Try a few times with just a single segment duration to make sure that the head of the stream
+						// is moving forwards
+						// Otherwise wait for the deadline
+						wait := time.Duration(0)
+						if try < deadlineTry {
+							wait = makeBackoff(segmentDuration, segmentDuration*time.Duration(2))
+						} else {
+							// Calculate when this sequence should be available, in addition use a random backoff
+							wait = makeBackoff(segmentDuration, segmentDuration*time.Duration(seqDelta))
+						}
+
 						logger.WithFields(
 							log.Fields{
 								"status":           response.StatusCode,
 								"try":              try,
 								"lastHeadSequence": lastHeadSeq,
 								"curHeadSequence":  curHeadSeq,
-							}).Warnln("Head sequence is not moving, failing segment")
-						finished <- finishedSegment{seq: sequence, typ: SegmentTypeFailed, data: nil}
-						break
-					}
+								"timeout":          wait,
+							}).Warnln("Segment not available")
 
-					// Wait for the stream move forwards and then try and get this segment again.
-					// Atleast 5 delta
-					seqDelta := sequence - curHeadSeq
-					if seqDelta <= 0 {
-						seqDelta = try + 1
-					}
+						time.Sleep(wait)
 
-					// Try a few times with just a single segment duration to make sure that the head of the stream
-					// is moving forwards
-					// Otherwise wait for the deadline
-					wait := time.Duration(0)
-					if try < deadlineTry {
-						wait = makeBackoff(segmentDuration, segmentDuration*time.Duration(2))
-					} else {
-						// Calculate when this sequence should be available, in addition use a random backoff
-						wait = makeBackoff(segmentDuration, segmentDuration*time.Duration(seqDelta))
+						try += 1
+						return false
 					}
 
 					logger.WithFields(
@@ -217,50 +237,55 @@ func (c *DashClient) segmentProducer(
 							"try":              try,
 							"lastHeadSequence": lastHeadSeq,
 							"curHeadSequence":  curHeadSeq,
-							"timeout":          wait,
-						}).Warnln("Segment not available")
+						}).Warnln("Unknown status code whilst trying to get segment")
 
-					time.Sleep(wait)
-
-					try += 1
-					continue
+					logger.Warnln(which, sequence, "Unknown status: ", response.Status)
+					time.Sleep(makeBackoff(segmentDuration, segmentDuration))
+					return false
 				}
 
-				logger.WithFields(
-					log.Fields{
-						"status":           response.StatusCode,
-						"try":              try,
-						"lastHeadSequence": lastHeadSeq,
-						"curHeadSequence":  curHeadSeq,
-					}).Warnln("Unknown status code whilst trying to get segment")
+				sequenceNum, err := strconv.Atoi(response.Header.Get("X-Sequence-Num"))
+				if err != nil {
+					// NOTE(emily): This is pessamistic here. I retry just to make sure that this was the correct
+					// sequence that we asked for. In all likelyhood it probably is, however without the X-Sequence-Num
+					// header there is no way to make sure.
+					logger.WithFields(log.Fields{"header": response.Header, "error": err}).Warnln("response header missing sequence number")
+					time.Sleep(makeBackoff(segmentDuration, segmentDuration))
+					return false
+				}
 
-				logger.Warnln(which, sequence, "Unknown status: ", response.Status)
-				time.Sleep(makeBackoff(segmentDuration, segmentDuration))
-				continue
+				if sequenceNum != sequence {
+					log.Warnln("Waiting (X-Sequence-Number=", sequenceNum, ")")
+					time.Sleep(makeBackoff(segmentDuration, segmentDuration))
+					return false
+				}
+
+				dlStartTime := time.Now()
+
+				// Now try and read all the data from the repsonse body
+				// We do this here because we might be ahead of writing by quite a bit, which might cause the response
+				// to expire, and the server to boot us.
+				// We also dont care about io.ErrUnexpectedEOF: this often happens for the last segment in the stream,
+				// which we dont perticularly care about being short...
+				bytes, err := io.ReadAll(response.Body)
+				if err != io.ErrUnexpectedEOF && err != nil {
+					logger.WithFields(log.Fields{"error": err}).Warn("Failed to download segment")
+					time.Sleep(makeBackoff(segmentDuration, segmentDuration))
+					return false
+				}
+
+				dlEndTime := time.Now()
+
+				finished <- finishedSegment{sequence, SegmentTypeNormal, bytes}
+
+				getTime := finishGet.Sub(startGet)
+				dlTime := dlEndTime.Sub(dlStartTime)
+
+				logger.WithFields(log.Fields{"requestTime": getTime, "dlTime": dlTime}).Infoln("Downloaded segment")
+				return true
+			}() {
+				break
 			}
-
-			sequenceNum, err := strconv.Atoi(response.Header.Get("X-Sequence-Num"))
-			if err != nil {
-				// NOTE(emily): This is pessamistic here. I retry just to make sure that this was the correct
-				// sequence that we asked for. In all likelyhood it probably is, however without the X-Sequence-Num
-				// header there is no way to make sure.
-				logger.WithFields(log.Fields{"header": response.Header, "error": err}).Warnln("response header missing sequence number")
-				time.Sleep(makeBackoff(segmentDuration, segmentDuration))
-			}
-
-			if sequenceNum != sequence {
-				log.Warnln("Waiting (X-Sequence-Number=", sequenceNum, ")")
-				time.Sleep(makeBackoff(segmentDuration, segmentDuration))
-				continue
-			}
-
-			finished <- finishedSegment{sequence, SegmentTypeNormal, response.Body}
-
-			requestTime := get.Sub(start)
-
-			logger.WithFields(log.Fields{"requestTime": requestTime}).Infoln("Downloaded segment")
-
-			break
 		}
 	}
 
@@ -272,7 +297,7 @@ func (c *DashClient) segmentProducer(
 		nextSeq += 1
 	}
 
-	segments := map[int]io.ReadCloser{}
+	segments := map[int][]byte{}
 	nextSeqToWrite := start
 
 	lastSeq := 0
@@ -306,12 +331,6 @@ func (c *DashClient) segmentProducer(
 			panic("unknown segment typ")
 		}
 
-		// If there are still sequences to get
-		if lastSeq == 0 || nextSeq < lastSeq {
-			go doSegment(nextSeq)
-			nextSeq += 1
-		}
-
 		// Try and write out as many segments as possible in order
 		for {
 			if s, ok := segments[nextSeqToWrite]; ok {
@@ -321,7 +340,7 @@ func (c *DashClient) segmentProducer(
 					"sequence":  nextSeqToWrite,
 					"remaining": len(segments),
 				}).Info("Writing to Ffmpeg")
-				_, err := io.Copy(pipe, bufio.NewReader(s))
+				_, err := io.Copy(pipe, bufio.NewReader(bytes.NewReader(s)))
 				if err != nil {
 					log.WithFields(log.Fields{
 						"which":     which,
@@ -330,13 +349,20 @@ func (c *DashClient) segmentProducer(
 						"error":     err,
 					}).Error("Failed to write segment")
 				}
-				s.Close()
 				log.WithFields(log.Fields{
 					"which":     which,
 					"sequence":  nextSeqToWrite,
 					"remaining": len(segments),
 				}).Infoln("Wrote to Ffmpeg")
 				nextSeqToWrite += 1
+
+				// If we wrote a segment, then download more segments
+				// If there are still sequences to get
+				if lastSeq == 0 || nextSeq < lastSeq {
+					go doSegment(nextSeq)
+					nextSeq += 1
+				}
+
 				continue
 			}
 			break
