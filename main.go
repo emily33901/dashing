@@ -22,38 +22,18 @@ func main() {
 	log.Println(url)
 
 	ytdlResult, err := ytdl(os.Args[1])
-
 	if err != nil {
 		panic(err)
 	}
 
-	var bestAudioFormat *YtdlResultFormat = nil
-	var bestVideoFormat *YtdlResultFormat = nil
+	if ytdlResult.LiveStatus != YtdlLiveStatusLive {
+		panic("video is not live")
+	}
 
-	for i, format := range ytdlResult.Formats {
-		typ := format.typ()
+	bestAudioFormat, bestVideoFormat := ytdlResult.BestFormats()
 
-		if typ == YtdlFormatTypeAudio {
-			log.Println("format audio", format.ID, *format.AudioSampleRate, "hz", "bitrate", *format.AudioBitRate)
-			if bestAudioFormat == nil || *format.AudioBitRate > *bestAudioFormat.AudioBitRate {
-				bestAudioFormat = &ytdlResult.Formats[i]
-			}
-		} else if typ == YtdlFormatTypeVideo {
-			log.Println("format video", format.ID, *format.Width, "x", *format.Height, "@", *format.FPS, "bitrate", *format.VideoBitRate)
-			if bestVideoFormat == nil || *format.VideoBitRate > *bestVideoFormat.VideoBitRate {
-				bestVideoFormat = &ytdlResult.Formats[i]
-			}
-		} else if typ == YtdlFormatTypeBoth {
-			log.Println("format both", format.ID, *format.Width, "x", *format.Height, "@", *format.FPS, "bitrate", *format.VideoBitRate)
-			if bestVideoFormat == nil || *format.VideoBitRate > *bestVideoFormat.VideoBitRate {
-				bestVideoFormat = &ytdlResult.Formats[i]
-			}
-
-			log.Println("format audio", format.ID, *format.AudioSampleRate, "hz", "bitrate", *format.AudioBitRate)
-			if bestAudioFormat == nil || *format.AudioBitRate > *bestAudioFormat.AudioBitRate {
-				bestAudioFormat = &ytdlResult.Formats[i]
-			}
-		}
+	if bestAudioFormat == nil || bestVideoFormat == nil {
+		panic("failed to find a video or audio format")
 	}
 
 	log.Println("chose format audio", bestAudioFormat.ID, *bestAudioFormat.AudioSampleRate, "hz", "bitrate", *bestAudioFormat.AudioBitRate)
@@ -67,20 +47,25 @@ func main() {
 	}
 	defer outputFile.Close()
 
-	c := DashClient{
-		id:          ytdlResult.DisplayID,
-		output:      bufio.NewWriter(outputFile),
-		audioFormat: bestAudioFormat.AsDashFormat(),
-		videoFormat: bestVideoFormat.AsDashFormat(),
+	bestDashAudioFormat, err := bestAudioFormat.AsDashFormat()
+	if err != nil {
+		panic(err)
 	}
+
+	bestDashVideoFormat, err := bestVideoFormat.AsDashFormat()
+	if err != nil {
+		panic(err)
+	}
+
+	c := NewDashClient(ytdlResult.DisplayID, bestDashAudioFormat, bestDashVideoFormat, bufio.NewWriter(outputFile))
 
 	c.Start()
 	err = c.Wait()
 
 	if err != nil {
-		log.Println("FFMpeg error: ", c.FfmpegError())
+		log.Println("ffmpeg error: ", c.FfmpegError())
 		panic(err)
 	}
 
-	log.Println("FFMpeg success:", c.FfmpegError())
+	log.Println("ffmpeg success:", c.FfmpegError())
 }

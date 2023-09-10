@@ -4,7 +4,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"log"
 	"net/http"
 	"net/url"
 	"os/exec"
@@ -13,6 +12,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	log "github.com/sirupsen/logrus"
 )
 
 type ServerInfo struct {
@@ -93,18 +94,63 @@ func (format *YtdlResultFormat) ExpiryDeadline() time.Time {
 	return time.Unix(int64(expire), 0)
 }
 
-func (format *YtdlResultFormat) AsDashFormat() DashFormat {
-	return &YoutubeDashFormat{
+func (format *YtdlResultFormat) AsDashFormat() (dashFormat DashFormat, err error) {
+	if format.FragmentBaseUrl == nil {
+		// Has no fragment base url, proably a video, we cannot use this format at this time
+		err = errors.New("cannot use ytdlresultformat as dashformat because FragmentBaseUrl is nil")
+		return
+	}
+
+	dashFormat = &YoutubeDashFormat{
 		originalUrl: *format.Url,
 		format:      *format,
 		lock:        sync.RWMutex{},
 	}
+
+	return
 }
+
+const (
+	YtdlLiveStatusLive    = "is_live"
+	YtdlLiveStatusNotLive = "not_live"
+)
 
 type YtdlResult struct {
 	Formats    []YtdlResultFormat `json:"formats"`
 	LiveStatus string             `json:"live_status"`
 	DisplayID  string             `json:"display_id"`
+}
+
+func (result *YtdlResult) BestFormats() (bestAudioFormat, bestVideoFormat *YtdlResultFormat) {
+	for i, format := range result.Formats {
+		typ := format.typ()
+
+		if typ == YtdlFormatTypeAudio {
+			log.Debugln("format audio", format.ID, *format.AudioSampleRate, "hz", "bitrate", *format.AudioBitRate)
+			if bestAudioFormat == nil || *format.AudioBitRate > *bestAudioFormat.AudioBitRate {
+				bestAudioFormat = &result.Formats[i]
+			}
+		} else if typ == YtdlFormatTypeVideo {
+			log.Debugln("format video", format.ID, *format.Width, "x", *format.Height, "@", *format.FPS, "bitrate", *format.VideoBitRate)
+			if bestVideoFormat == nil || *format.VideoBitRate > *bestVideoFormat.VideoBitRate {
+				bestVideoFormat = &result.Formats[i]
+			}
+		} else if typ == YtdlFormatTypeBoth {
+			log.Debugln("format both")
+
+			log.Debugln("  format video", format.ID, *format.Width, "x", *format.Height, "@", *format.FPS, "bitrate", *format.VideoBitRate)
+			if bestVideoFormat == nil || *format.VideoBitRate > *bestVideoFormat.VideoBitRate {
+				bestVideoFormat = &result.Formats[i]
+			}
+
+			log.Debugln("  format audio", format.ID, *format.AudioSampleRate, "hz", "bitrate", *format.AudioBitRate)
+			if bestAudioFormat == nil || *format.AudioBitRate > *bestAudioFormat.AudioBitRate {
+				bestAudioFormat = &result.Formats[i]
+			}
+		}
+	}
+
+	return
 }
 
 var (

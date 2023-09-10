@@ -31,6 +31,7 @@ func NewDashClient(id string, af, vf DashFormat, out io.Writer) DashClient {
 		id:          id,
 		audioFormat: af,
 		videoFormat: vf,
+		output:      out,
 	}
 }
 
