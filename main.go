@@ -30,8 +30,6 @@ func main() {
 	var bestAudioFormat *YtdlResultFormat = nil
 	var bestVideoFormat *YtdlResultFormat = nil
 
-	log.Println(ytdlResult.Formats)
-
 	for i, format := range ytdlResult.Formats {
 		typ := format.typ()
 
@@ -80,9 +78,9 @@ func main() {
 	err = c.Wait()
 
 	if err != nil {
-		log.Println("FFMpeg error: ", c.ffmpegError.String())
+		log.Println("FFMpeg error: ", c.FfmpegError())
 		panic(err)
 	}
 
-	log.Println("FFMpeg success:", c.ffmpegError.String())
+	log.Println("FFMpeg success:", c.FfmpegError())
 }

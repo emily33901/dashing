@@ -3,20 +3,14 @@ package main
 import (
 	"bufio"
 	"bytes"
-	"fmt"
 	"io"
 	"math/rand"
-	"net"
 	"net/http"
-	"os"
-	"os/exec"
 	"strconv"
 	"strings"
 	"time"
 
 	log "github.com/sirupsen/logrus"
-
-	"gopkg.in/natefinch/npipe.v2"
 )
 
 const (
@@ -28,8 +22,7 @@ type DashClient struct {
 	audioFormat DashFormat
 	videoFormat DashFormat
 	client      http.Client
-	ffmpeg      *exec.Cmd
-	ffmpegError *strings.Builder
+	ffmpeg      *Ffmpeg
 	output      io.Writer
 }
 
@@ -39,47 +32,6 @@ func NewDashClient(id string, af, vf DashFormat, out io.Writer) DashClient {
 		audioFormat: af,
 		videoFormat: vf,
 	}
-}
-
-//
-func ffmpeg(id string) (net.Listener, net.Listener, net.Listener, *strings.Builder, *exec.Cmd) {
-	aname := fmt.Sprintf(`\\.\pipe\DashClient\%s\a`, id)
-	vname := fmt.Sprintf(`\\.\pipe\DashClient\%s\v`, id)
-	oname := fmt.Sprintf(`\\.\pipe\DashClient\%s\o`, id)
-
-	// TODO(emily): Windows specific
-	audioPipe, err := npipe.Listen(aname)
-	if err != nil {
-		panic(err)
-	}
-	videoPipe, err := npipe.Listen(vname)
-	if err != nil {
-		panic(err)
-	}
-	outputPipe, err := npipe.Listen(oname)
-	if err != nil {
-		panic(err)
-	}
-
-	cmd := exec.Command(
-		"ffmpeg",
-		"-thread_queue_size", fmt.Sprintf("%d", 1024),
-		"-i", vname,
-		"-thread_queue_size", fmt.Sprintf("%d", 1024),
-		"-i", aname,
-		"-map", "0",
-		"-map", "1",
-		"-c", "copy",
-		"-f", "mp4",
-		"-movflags", "frag_keyframe",
-		"-hide_banner",
-		"-y",
-		oname)
-
-	stderr := &strings.Builder{}
-	cmd.Stderr = stderr
-
-	return audioPipe, videoPipe, outputPipe, stderr, cmd
 }
 
 func makeBackoff(interval time.Duration, initial time.Duration) time.Duration {
@@ -160,7 +112,8 @@ func (c *DashClient) segmentProducer(
 					time.Sleep(makeBackoff(segmentDuration, segmentDuration))
 					return false
 				}
-				logger.WithFields(log.Fields{"contentLength": response.ContentLength, "statusCode": response.StatusCode}).Debugln(which, sequence, "Got response")
+				logger.WithFields(
+					log.Fields{"contentLength": response.ContentLength, "statusCode": response.StatusCode}).Debugln(which, sequence, "Got response")
 
 				lastHeadSeq := lastInfo.HeadSequence
 				curHeadSeq := info.HeadSequence
@@ -184,9 +137,12 @@ func (c *DashClient) segmentProducer(
 						const deadlineTry = 5
 
 						// Make sure that the head sequence is actually moving forwards
-						// (allow for atleast 2 durations worth of slack here, because we are not synced with the
-						// servers wall-clock).
-						if try > deadlineTry && curHeadSeq == lastHeadSeq {
+						// (allow for atleast `deadlineTry` durations worth of slack here, because we are not synced
+						// with the servers wall-clock).
+						// NOTE(emily): If the curHeadSeq is ahead of this sequence, then don't preemptively fail this
+						// segment. This is likely to happen if we are downloading a video that has already finished,
+						// rather than a livestream.
+						if try > deadlineTry && curHeadSeq == lastHeadSeq && curHeadSeq <= sequence {
 							logger.WithFields(
 								log.Fields{
 									"status":           response.StatusCode,
@@ -369,7 +325,11 @@ func (c *DashClient) segmentProducer(
 		}
 	}
 
-	log.Println(which, "done")
+	log.WithFields(log.Fields{
+		"which":    which,
+		"sequence": nextSeqToWrite,
+		"last":     lastSeq,
+	}).Debugln("done")
 }
 
 func (c *DashClient) Start() {
@@ -377,57 +337,29 @@ func (c *DashClient) Start() {
 		panic("DashClient already started")
 	}
 
-	apipe, vpipe, opipe, ffmpegError, cmd := ffmpeg(c.id)
+	c.ffmpeg = NewFfmpeg(c.id)
 
-	c.ffmpeg = cmd
-	c.ffmpegError = ffmpegError
-
-	// startingSegment := headSegmentCount + 20
 	startingSegment := 0
 
-	if len(os.Args) > 2 {
-		s, err := strconv.Atoi(os.Args[2])
-		if err != nil {
-			panic(err)
-		}
-		startingSegment = s
+	err := c.ffmpeg.Start(
+		func(pipe io.ReadWriteCloser) {
+			c.segmentProducer(c.audioFormat, "apipe", startingSegment, pipe)
+		}, func(pipe io.ReadWriteCloser) {
+			c.segmentProducer(c.videoFormat, "vpipe", startingSegment, pipe)
+		}, func(pipe io.ReadWriteCloser) {
+			io.Copy(c.output, bufio.NewReader(pipe))
+		},
+	)
+
+	if err != nil {
+		panic(err)
 	}
-
-	go func() {
-		defer apipe.Close()
-		conn, err := apipe.Accept()
-
-		if err != nil {
-			panic(err)
-		}
-		defer conn.Close()
-
-		c.segmentProducer(c.audioFormat, "apipe", startingSegment, conn)
-	}()
-	go func() {
-		defer vpipe.Close()
-		conn, err := vpipe.Accept()
-		if err != nil {
-			panic(err)
-		}
-		defer conn.Close()
-
-		c.segmentProducer(c.videoFormat, "vpipe", startingSegment, conn)
-	}()
-	go func() {
-		defer opipe.Close()
-		conn, err := opipe.Accept()
-		if err != nil {
-			panic(err)
-		}
-		defer conn.Close()
-
-		io.Copy(c.output, bufio.NewReader(conn))
-	}()
-
-	cmd.Start()
 }
 
 func (c *DashClient) Wait() error {
 	return c.ffmpeg.Wait()
+}
+
+func (c *DashClient) FfmpegError() *strings.Builder {
+	return c.ffmpeg.errLog
 }

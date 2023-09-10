@@ -6,18 +6,22 @@ import (
 	"strings"
 )
 
+type OnPipe func(pipe io.ReadWriteCloser)
+
 type Ffmpeg struct {
 	id     string
 	cmd    *exec.Cmd
 	errLog *strings.Builder
-	apipe  io.ReadWriteCloser
-	vpipe  io.ReadWriteCloser
-	opipe  io.ReadWriteCloser
 }
 
-func (f *Ffmpeg) Start(id string) error {
-	f.id = id
-	cmd, apipe, vpipe, opipe, stderr, err := f.start(id)
+func NewFfmpeg(id string) *Ffmpeg {
+	return &Ffmpeg{
+		id: id,
+	}
+}
+
+func (f *Ffmpeg) Start(onAudioPipe, onVideoPipe, onOutputPipe OnPipe) error {
+	cmd, stderr, err := f.start(f.id, onAudioPipe, onVideoPipe, onOutputPipe)
 
 	if err != nil {
 		return err
@@ -26,10 +30,6 @@ func (f *Ffmpeg) Start(id string) error {
 	f.cmd = cmd
 	f.errLog = stderr
 
-	f.apipe = apipe
-	f.vpipe = vpipe
-	f.opipe = opipe
-
 	return nil
 }
 
@@ -37,14 +37,6 @@ func (f *Ffmpeg) Wait() error {
 	return f.cmd.Wait()
 }
 
-func (f *Ffmpeg) AudioWriter() io.WriteCloser {
-	return f.apipe
-}
-
-func (f *Ffmpeg) VideoWriter() io.WriteCloser {
-	return f.vpipe
-}
-
-func (f *Ffmpeg) OutputReader() io.WriteCloser {
-	return f.opipe
+func (f *Ffmpeg) Err() *strings.Builder {
+	return f.errLog
 }

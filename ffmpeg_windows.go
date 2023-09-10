@@ -2,7 +2,6 @@ package main
 
 import (
 	"fmt"
-	"io"
 	"net"
 	"os/exec"
 	"strings"
@@ -22,24 +21,21 @@ func (f *Ffmpeg) createPipe(id, name string) (pipeName string, pipe net.Listener
 	return
 }
 
-func (f *Ffmpeg) start(id string) (cmd *exec.Cmd, apipe, vpipe, opipe io.ReadWriteCloser, stderr *strings.Builder, err error) {
+func (f *Ffmpeg) start(id string, onAudioPipe, onVideoPipe, onOutputPipe OnPipe) (cmd *exec.Cmd, stderr *strings.Builder, err error) {
 	aname, audioPipeListener, err := f.createPipe(id, "a")
 	if err != nil {
 		return
 	}
-	defer audioPipeListener.Close()
 
 	vname, videoPipeListener, err := f.createPipe(id, "v")
 	if err != nil {
 		return
 	}
-	defer videoPipeListener.Close()
 
 	oname, outputPipeListener, err := f.createPipe(id, "o")
 	if err != nil {
 		return
 	}
-	defer outputPipeListener.Close()
 
 	cmd = exec.Command(
 		"ffmpeg",
@@ -59,48 +55,43 @@ func (f *Ffmpeg) start(id string) (cmd *exec.Cmd, apipe, vpipe, opipe io.ReadWri
 	stderr = &strings.Builder{}
 	cmd.Stderr = stderr
 
-	type pipeResult struct {
-		name string
-		pipe io.ReadWriteCloser
-		err  error
-	}
+	go func() {
+		defer videoPipeListener.Close()
+		pipe, err := videoPipeListener.Accept()
 
-	pipes := make(chan pipeResult)
-	defer close(pipes)
-
-	listenPipe := func(name string, listener net.Listener) {
-		pipe, err := listener.Accept()
-
-		pipes <- pipeResult{
-			name, pipe, err,
+		if err != nil {
+			panic(err)
 		}
-	}
+		defer pipe.Close()
 
-	go listenPipe("apipe", audioPipeListener)
-	go listenPipe("vpipe", videoPipeListener)
-	go listenPipe("opipe", outputPipeListener)
+		onVideoPipe(pipe)
+	}()
+
+	go func() {
+		defer audioPipeListener.Close()
+		pipe, err := audioPipeListener.Accept()
+
+		if err != nil {
+			panic(err)
+		}
+		defer pipe.Close()
+
+		onAudioPipe(pipe)
+	}()
+
+	go func() {
+		defer outputPipeListener.Close()
+		pipe, err := outputPipeListener.Accept()
+
+		if err != nil {
+			panic(err)
+		}
+		defer pipe.Close()
+
+		onOutputPipe(pipe)
+	}()
 
 	err = cmd.Start()
-	if err != nil {
-		return
-	}
-
-	pipesMap := map[string]io.ReadWriteCloser{}
-
-	// Get all our pipes
-	for len(pipesMap) != 3 {
-		pipeResult := <-pipes
-		if pipeResult.err != nil {
-			err = pipeResult.err
-			return
-		}
-
-		pipesMap[pipeResult.name] = pipeResult.pipe
-	}
-
-	apipe = pipesMap["apipe"]
-	vpipe = pipesMap["vpipe"]
-	opipe = pipesMap["opipe"]
 
 	return
 }
