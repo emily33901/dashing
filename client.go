@@ -72,6 +72,7 @@ func (c *DashClient) segmentProducer(
 
 	doSegment := func(sequence int) {
 		logger := log.WithFields(log.Fields{
+			"id":       c.id,
 			"which":    which,
 			"sequence": sequence,
 		})
@@ -265,6 +266,7 @@ func (c *DashClient) segmentProducer(
 		// We use this little buffer here to allow for out of order responses for segments
 		// which we can then write in order
 		log.WithFields(log.Fields{
+			"id":        c.id,
 			"which":     which,
 			"sequence":  nextSeqToWrite,
 			"remaining": len(segments),
@@ -276,6 +278,7 @@ func (c *DashClient) segmentProducer(
 			if lastSeq == 0 || finishedSegment.seq < lastSeq {
 				lastSeq = finishedSegment.seq
 				log.WithFields(log.Fields{
+					"id":        c.id,
 					"which":     which,
 					"sequence":  nextSeqToWrite,
 					"remaining": len(segments),
@@ -293,6 +296,7 @@ func (c *DashClient) segmentProducer(
 			if s, ok := segments[nextSeqToWrite]; ok {
 				delete(segments, nextSeqToWrite)
 				log.WithFields(log.Fields{
+					"id":        c.id,
 					"which":     which,
 					"sequence":  nextSeqToWrite,
 					"remaining": len(segments),
@@ -300,6 +304,7 @@ func (c *DashClient) segmentProducer(
 				_, err := io.Copy(pipe, bufio.NewReader(bytes.NewReader(s)))
 				if err != nil {
 					log.WithFields(log.Fields{
+						"id":        c.id,
 						"which":     which,
 						"sequence":  nextSeqToWrite,
 						"remaining": len(segments),
@@ -307,6 +312,7 @@ func (c *DashClient) segmentProducer(
 					}).Error("Failed to write segment")
 				}
 				log.WithFields(log.Fields{
+					"id":        c.id,
 					"which":     which,
 					"sequence":  nextSeqToWrite,
 					"remaining": len(segments),
@@ -327,6 +333,7 @@ func (c *DashClient) segmentProducer(
 	}
 
 	log.WithFields(log.Fields{
+		"id":       c.id,
 		"which":    which,
 		"sequence": nextSeqToWrite,
 		"last":     lastSeq,
