@@ -1,6 +1,7 @@
 package main
 
 import (
+	"fmt"
 	"io"
 	"os/exec"
 	"strings"
@@ -39,4 +40,21 @@ func (f *Ffmpeg) Wait() error {
 
 func (f *Ffmpeg) Err() *strings.Builder {
 	return f.errLog
+}
+
+func (f *Ffmpeg) makeCmd(aname, vname, oname string) *exec.Cmd {
+	return exec.Command(
+		"ffmpeg",
+		"-thread_queue_size", fmt.Sprintf("%d", 1024),
+		"-i", vname,
+		"-thread_queue_size", fmt.Sprintf("%d", 1024),
+		"-i", aname,
+		"-map", "0",
+		"-map", "1",
+		"-c", "copy",
+		"-f", "mp4",
+		"-movflags", "frag_keyframe",
+		"-hide_banner",
+		"-y",
+		oname)
 }

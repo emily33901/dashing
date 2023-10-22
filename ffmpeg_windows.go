@@ -37,20 +37,7 @@ func (f *Ffmpeg) start(id string, onAudioPipe, onVideoPipe, onOutputPipe OnPipe)
 		return
 	}
 
-	cmd = exec.Command(
-		"ffmpeg",
-		"-thread_queue_size", fmt.Sprintf("%d", 1024),
-		"-i", vname,
-		"-thread_queue_size", fmt.Sprintf("%d", 1024),
-		"-i", aname,
-		"-map", "0",
-		"-map", "1",
-		"-c", "copy",
-		"-f", "mp4",
-		"-movflags", "frag_keyframe",
-		"-hide_banner",
-		"-y",
-		oname)
+	cmd = f.makeCmd(aname, vname, oname)
 
 	stderr = &strings.Builder{}
 	cmd.Stderr = stderr
