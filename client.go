@@ -6,7 +6,6 @@ import (
 	"io"
 	"math/rand"
 	"net/http"
-	"os"
 	"strconv"
 	"strings"
 	"time"

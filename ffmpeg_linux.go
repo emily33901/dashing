@@ -40,13 +40,6 @@ func (f *Ffmpeg) createPipe(id, name string, flag int) (pipeName string, file *o
 }
 
 func (f *Ffmpeg) start(id string, onAudioPipe, onVideoPipe, onOutputPipe OnPipe) (cmd *exec.Cmd, stderr *strings.Builder, err error) {
-	cmd = f.makeCmd(aname, vname, oname)
-
-	stderr = &strings.Builder{}
-	cmd.Stderr = stderr
-
-	err = cmd.Start()
-
 	aname, audioFifo, err := f.createPipe(id, "a", os.O_WRONLY)
 	if err != nil {
 		return
@@ -61,6 +54,13 @@ func (f *Ffmpeg) start(id string, onAudioPipe, onVideoPipe, onOutputPipe OnPipe)
 	if err != nil {
 		return
 	}
+
+	cmd = f.makeCmd(aname, vname, oname)
+
+	stderr = &strings.Builder{}
+	cmd.Stderr = stderr
+
+	err = cmd.Start()
 
 	go func() {
 		defer videoFifo.Close()
