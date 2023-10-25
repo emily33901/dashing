@@ -21,7 +21,7 @@ func (f *Ffmpeg) createPipeName(id, name string) (path string, err error) {
 	return
 }
 
-func (f *Ffmpeg) createPipe(id, name string) (pipeName string, file *os.File, err error) {
+func (f *Ffmpeg) createPipe(id, name string, flag int) (pipeName string, file *os.File, err error) {
 	pipeName, err = f.createPipeName(id, name)
 
 	if err != nil {
@@ -34,31 +34,33 @@ func (f *Ffmpeg) createPipe(id, name string) (pipeName string, file *os.File, er
 		return
 	}
 
-	file, err = os.OpenFile(pipeName, os.O_RDWR|os.O_CREATE|os.O_APPEND, os.ModeNamedPipe)
+	file, err = os.OpenFile(pipeName, flag|os.O_CREATE, os.ModeNamedPipe)
 
 	return
 }
 
 func (f *Ffmpeg) start(id string, onAudioPipe, onVideoPipe, onOutputPipe OnPipe) (cmd *exec.Cmd, stderr *strings.Builder, err error) {
-	aname, audioFifo, err := f.createPipe(id, "a")
-	if err != nil {
-		return
-	}
-
-	vname, videoFifo, err := f.createPipe(id, "v")
-	if err != nil {
-		return
-	}
-
-	oname, outputFifo, err := f.createPipe(id, "o")
-	if err != nil {
-		return
-	}
-
 	cmd = f.makeCmd(aname, vname, oname)
 
 	stderr = &strings.Builder{}
 	cmd.Stderr = stderr
+
+	err = cmd.Start()
+
+	aname, audioFifo, err := f.createPipe(id, "a", os.O_WRONLY)
+	if err != nil {
+		return
+	}
+
+	vname, videoFifo, err := f.createPipe(id, "v", os.O_WRONLY)
+	if err != nil {
+		return
+	}
+
+	oname, outputFifo, err := f.createPipe(id, "o", os.O_RDONLY)
+	if err != nil {
+		return
+	}
 
 	go func() {
 		defer videoFifo.Close()
@@ -72,8 +74,6 @@ func (f *Ffmpeg) start(id string, onAudioPipe, onVideoPipe, onOutputPipe OnPipe)
 		defer outputFifo.Close()
 		onOutputPipe(videoFifo)
 	}()
-
-	err = cmd.Start()
 
 	return
 }
